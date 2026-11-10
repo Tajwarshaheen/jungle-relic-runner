@@ -1,0 +1,7 @@
+{
+  "name": "Jungle Relic Runner",
+  "description": "An action-packed 3D endless runner through ancient temple ruins, treacherous jungle paths, and golden relics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

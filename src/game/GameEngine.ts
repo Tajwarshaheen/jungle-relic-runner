@@ -1,0 +1,915 @@
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { soundEngine } from './audio';
+import { Adventurer } from './Adventurer';
+import { TrackGenerator } from './TrackGenerator';
+import { ObstacleManager } from './Obstacles';
+import { CoinManager } from './Coins';
+import { ParticleSystem } from './particles';
+import { ChaserBeast } from './ChaserBeast';
+
+export type GameState = 'MENU' | 'PLAYING' | 'PAUSED' | 'GAME_OVER';
+
+export interface GameStats {
+  score: number;
+  distance: number;
+  coins: number;
+  highScore: number;
+  speed: number;
+  activeShield: boolean;
+  activeMagnet: boolean;
+  activeRush: boolean;
+  magnetTimeLeft: number;
+  rushTimeLeft: number;
+  turnPrompt: 'left' | 'right' | null;
+  stumblesRemaining: number;
+  maxStumbles: number;
+  isBeastOnHeels: boolean;
+  beastTimeLeft: number;
+  gameOverReason: 'BEAST_CAUGHT' | 'FALL' | 'WALL' | null;
+}
+
+export class GameEngine {
+  private container: HTMLElement;
+  private renderer: THREE.WebGLRenderer;
+  private scene: THREE.Scene;
+  private camera: THREE.PerspectiveCamera;
+  private clock: THREE.Clock;
+
+  // Game entities
+  public player: Adventurer;
+  public beast: ChaserBeast;
+  public trackGen: TrackGenerator;
+  public obstacleMgr: ObstacleManager;
+  public coinMgr: CoinManager;
+  public particleSys: ParticleSystem;
+  private monsterRoarTimer: number = 0;
+
+  // Chaser Beast Surge & 3-Stumble System
+  public stumblesRemaining: number = 3;
+  public readonly maxStumbles: number = 3;
+  public beastSurgeTimer: number = 0;
+  public currentBeastDistance: number = 14.0;
+  public gameOverReason: 'BEAST_CAUGHT' | 'FALL' | 'WALL' | null = null;
+  private cameraShakeTimer: number = 0;
+
+  // Environment lights
+  private dirLight: THREE.DirectionalLight;
+  private hemiLight: THREE.HemisphereLight;
+
+  // Game state
+  public state: GameState = 'MENU';
+  public stats: GameStats;
+
+  // Running mechanics
+  private baseSpeed: number = 18.0;
+  private currentSpeed: number = 18.0;
+  private maxSpeed: number = 36.0;
+  private playerDistance: number = 0;
+  private coinsCount: number = 0;
+  private highScore: number = 0;
+
+  // Corridor tracking & 90-degree corner turning
+  public activeChunkIdx: number = 0;
+  public distanceInChunk: number = 0;
+  public targetHeadingAngle: number = 0;
+  public currentHeadingAngle: number = 0;
+  public turnPrompt: 'left' | 'right' | null = null;
+
+  // Powerup timers
+  private magnetTimer: number = 0;
+  private rushTimer: number = 0;
+
+  // Loop control
+  private animationFrameId: number | null = null;
+  private onStatsUpdate: ((stats: GameStats) => void) | null = null;
+  private onStateChange: ((state: GameState) => void) | null = null;
+
+  // Swipe gesture tracking
+  private touchStartX: number = 0;
+  private touchStartY: number = 0;
+  private touchStartTime: number = 0;
+
+  constructor(container: HTMLElement) {
+    this.container = container;
+
+    // Load high score from localStorage
+    const savedHighScore = localStorage.getItem('jungle_runner_highscore');
+    this.highScore = savedHighScore ? parseInt(savedHighScore, 10) : 0;
+
+    this.stats = {
+      score: 0,
+      distance: 0,
+      coins: 0,
+      highScore: this.highScore,
+      speed: this.baseSpeed,
+      activeShield: false,
+      activeMagnet: false,
+      activeRush: false,
+      magnetTimeLeft: 0,
+      rushTimeLeft: 0,
+      turnPrompt: null,
+      stumblesRemaining: 3,
+      maxStumbles: 3,
+      isBeastOnHeels: false,
+      beastTimeLeft: 0,
+      gameOverReason: null,
+    };
+
+    // 1. Scene setup
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0x071b12);
+    this.scene.fog = new THREE.FogExp2(0x071b12, 0.016);
+
+    // 2. Camera setup
+    const aspect = container.clientWidth / container.clientHeight;
+    this.camera = new THREE.PerspectiveCamera(65, aspect, 0.1, 350);
+    this.camera.position.set(0, 3.2, -5.5);
+
+    // 3. Renderer setup
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: 'high-performance',
+    });
+    this.renderer.setSize(container.clientWidth, container.clientHeight);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    container.innerHTML = '';
+    container.appendChild(this.renderer.domElement);
+
+    // 4. Studio Environment for metallic & relic reflections
+    const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+    pmremGenerator.dispose();
+
+    // 5. Lighting Rig
+    this.hemiLight = new THREE.HemisphereLight(0x7dd3fc, 0x14532d, 0.7);
+    this.scene.add(this.hemiLight);
+
+    this.dirLight = new THREE.DirectionalLight(0xfff7ed, 1.8);
+    this.dirLight.position.set(20, 45, -15);
+    this.dirLight.castShadow = true;
+    this.dirLight.shadow.mapSize.width = 1024;
+    this.dirLight.shadow.mapSize.height = 1024;
+    this.dirLight.shadow.camera.near = 10;
+    this.dirLight.shadow.camera.far = 120;
+    this.dirLight.shadow.camera.left = -16;
+    this.dirLight.shadow.camera.right = 16;
+    this.dirLight.shadow.camera.top = 25;
+    this.dirLight.shadow.camera.bottom = -15;
+    this.dirLight.shadow.bias = -0.0005;
+    this.scene.add(this.dirLight);
+    this.scene.add(this.dirLight.target);
+
+    // 6. Initialize Game Subsystems
+    this.obstacleMgr = new ObstacleManager();
+    this.coinMgr = new CoinManager();
+    this.trackGen = new TrackGenerator(this.scene, this.obstacleMgr, this.coinMgr);
+    this.player = new Adventurer();
+    this.scene.add(this.player.group);
+
+    this.beast = new ChaserBeast();
+    this.scene.add(this.beast.group);
+
+    this.particleSys = new ParticleSystem();
+    this.scene.add(this.particleSys.group);
+
+    this.clock = new THREE.Clock();
+
+    // 7. Event listeners
+    this.bindEvents();
+
+    // 8. Generate starting track & pre-warm
+    this.trackGen.initTrack(6);
+    this.renderer.compile(this.scene, this.camera);
+
+    // Start animation loop
+    this.startLoop();
+  }
+
+  public setCallbacks(
+    onStats: (stats: GameStats) => void,
+    onState: (state: GameState) => void
+  ) {
+    this.onStatsUpdate = onStats;
+    this.onStateChange = onState;
+    this.notifyState();
+    this.notifyStats();
+  }
+
+  private notifyState() {
+    if (this.onStateChange) this.onStateChange(this.state);
+  }
+
+  private notifyStats() {
+    if (this.onStatsUpdate) this.onStatsUpdate({ ...this.stats });
+  }
+
+  // --- Controls & Input ---
+
+  private bindEvents() {
+    window.addEventListener('keydown', this.handleKeyDown);
+    window.addEventListener('resize', this.handleResize);
+
+    const dom = this.renderer.domElement;
+    dom.addEventListener('touchstart', this.handleTouchStart, { passive: false });
+    dom.addEventListener('touchend', this.handleTouchEnd, { passive: false });
+    dom.addEventListener('mousedown', this.handleMouseDown);
+    dom.addEventListener('mouseup', this.handleMouseUp);
+  }
+
+  private unbindEvents() {
+    window.removeEventListener('keydown', this.handleKeyDown);
+    window.removeEventListener('resize', this.handleResize);
+
+    const dom = this.renderer.domElement;
+    dom.removeEventListener('touchstart', this.handleTouchStart);
+    dom.removeEventListener('touchend', this.handleTouchEnd);
+    dom.removeEventListener('mousedown', this.handleMouseDown);
+    dom.removeEventListener('mouseup', this.handleMouseUp);
+  }
+
+  private handleKeyDown = (e: KeyboardEvent) => {
+    if (this.state === 'MENU' || this.state === 'GAME_OVER') {
+      if (e.code === 'Space' || e.code === 'Enter') {
+        this.startGame();
+      }
+      return;
+    }
+
+    if (e.code === 'KeyP' || e.code === 'Escape') {
+      this.togglePause();
+      return;
+    }
+
+    if (this.state !== 'PLAYING') return;
+
+    switch (e.code) {
+      case 'ArrowLeft':
+      case 'KeyA':
+        this.executeLeftAction();
+        break;
+      case 'ArrowRight':
+      case 'KeyD':
+        this.executeRightAction();
+        break;
+      case 'ArrowUp':
+      case 'KeyW':
+      case 'Space':
+        if (this.player.jump()) {
+          soundEngine.playJump();
+        }
+        break;
+      case 'ArrowDown':
+      case 'KeyS':
+        if (this.player.slide()) {
+          soundEngine.playSlide();
+          this.particleSys.emitSlideSparks(
+            this.player.group.position.x,
+            this.player.group.position.y,
+            this.player.group.position.z
+          );
+        }
+        break;
+    }
+  };
+
+  private handleMouseDown = (e: MouseEvent) => {
+    this.touchStartX = e.clientX;
+    this.touchStartY = e.clientY;
+    this.touchStartTime = performance.now();
+  };
+
+  private handleMouseUp = (e: MouseEvent) => {
+    this.processSwipe(e.clientX, e.clientY);
+  };
+
+  private handleTouchStart = (e: TouchEvent) => {
+    if (e.touches.length > 0) {
+      this.touchStartX = e.touches[0].clientX;
+      this.touchStartY = e.touches[0].clientY;
+      this.touchStartTime = performance.now();
+    }
+  };
+
+  private handleTouchEnd = (e: TouchEvent) => {
+    if (e.changedTouches.length === 0) return;
+    this.processSwipe(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+  };
+
+  private processSwipe(endX: number, endY: number) {
+    const deltaX = endX - this.touchStartX;
+    const deltaY = endY - this.touchStartY;
+    const deltaTime = performance.now() - this.touchStartTime;
+
+    const absX = Math.abs(deltaX);
+    const absY = Math.abs(deltaY);
+
+    if (this.state === 'MENU') {
+      if (deltaTime < 350 && absX < 20 && absY < 20) {
+        this.startGame();
+      }
+      return;
+    }
+
+    if (this.state !== 'PLAYING') return;
+
+    const minSwipeDist = 20;
+    if (Math.max(absX, absY) > minSwipeDist) {
+      if (absX > absY) {
+        // Horizontal swipe
+        if (deltaX < 0) {
+          this.executeLeftAction();
+        } else {
+          this.executeRightAction();
+        }
+      } else {
+        // Vertical swipe
+        if (deltaY < 0) {
+          if (this.player.jump()) {
+            soundEngine.playJump();
+          }
+        } else {
+          if (this.player.slide()) {
+            soundEngine.playSlide();
+            this.particleSys.emitSlideSparks(
+              this.player.group.position.x,
+              this.player.group.position.y,
+              this.player.group.position.z
+            );
+          }
+        }
+      }
+    }
+  }
+
+  // --- Dynamic 90-Degree Turn vs Lane Shift Actions ---
+
+  public executeLeftAction() {
+    if (this.state !== 'PLAYING') return;
+
+    const chunk = this.trackGen.chunks[this.activeChunkIdx];
+    // Check if at a Corner Turn that turns LEFT
+    if (
+      chunk &&
+      chunk.isCorner &&
+      chunk.turnDirection === 'left' &&
+      !chunk.hasTurned &&
+      this.distanceInChunk >= chunk.turnZoneStart! &&
+      this.distanceInChunk <= chunk.turnZoneEnd!
+    ) {
+      // 90° CORNER TURN LEFT!
+      chunk.hasTurned = true;
+      soundEngine.playTurn();
+      this.activeChunkIdx++;
+      this.distanceInChunk = 0;
+      this.targetHeadingAngle = chunk.exitAngle;
+      this.turnPrompt = null;
+      this.particleSys.emitRunningDust(
+        this.player.group.position.x,
+        this.player.group.position.y,
+        this.player.group.position.z
+      );
+      return;
+    }
+
+    // Standard Lane change Left
+    this.player.moveLeft();
+  }
+
+  public executeRightAction() {
+    if (this.state !== 'PLAYING') return;
+
+    const chunk = this.trackGen.chunks[this.activeChunkIdx];
+    // Check if at a Corner Turn that turns RIGHT
+    if (
+      chunk &&
+      chunk.isCorner &&
+      chunk.turnDirection === 'right' &&
+      !chunk.hasTurned &&
+      this.distanceInChunk >= chunk.turnZoneStart! &&
+      this.distanceInChunk <= chunk.turnZoneEnd!
+    ) {
+      // 90° CORNER TURN RIGHT!
+      chunk.hasTurned = true;
+      soundEngine.playTurn();
+      this.activeChunkIdx++;
+      this.distanceInChunk = 0;
+      this.targetHeadingAngle = chunk.exitAngle;
+      this.turnPrompt = null;
+      this.particleSys.emitRunningDust(
+        this.player.group.position.x,
+        this.player.group.position.y,
+        this.player.group.position.z
+      );
+      return;
+    }
+
+    // Standard Lane change Right
+    this.player.moveRight();
+  }
+
+  // Direct programmatic mobile controls for UI buttons
+  public triggerLeft() {
+    this.executeLeftAction();
+  }
+  public triggerRight() {
+    this.executeRightAction();
+  }
+  public triggerJump() {
+    if (this.state === 'PLAYING' && this.player.jump()) {
+      soundEngine.playJump();
+    }
+  }
+  public triggerSlide() {
+    if (this.state === 'PLAYING' && this.player.slide()) {
+      soundEngine.playSlide();
+      this.particleSys.emitSlideSparks(
+        this.player.group.position.x,
+        this.player.group.position.y,
+        this.player.group.position.z
+      );
+    }
+  }
+
+  private handleResize = () => {
+    if (!this.container) return;
+    const width = this.container.clientWidth;
+    const height = this.container.clientHeight;
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(width, height);
+  };
+
+  // --- Game Lifecycle Transitions ---
+
+  public startGame() {
+    soundEngine.startJungleAtmosphere();
+    soundEngine.playMonsterRoar();
+    this.resetRun();
+    this.state = 'PLAYING';
+    this.notifyState();
+  }
+
+  public togglePause() {
+    if (this.state === 'PLAYING') {
+      this.state = 'PAUSED';
+      this.notifyState();
+    } else if (this.state === 'PAUSED') {
+      this.state = 'PLAYING';
+      this.clock.getDelta();
+      this.notifyState();
+    }
+  }
+
+  public goToMenu() {
+    this.state = 'MENU';
+    this.resetRun();
+    this.notifyState();
+  }
+
+  public restartGame() {
+    this.startGame();
+  }
+
+  private resetRun() {
+    this.playerDistance = 0;
+    this.coinsCount = 0;
+    this.currentSpeed = this.baseSpeed;
+    this.magnetTimer = 0;
+    this.rushTimer = 0;
+
+    this.activeChunkIdx = 0;
+    this.distanceInChunk = 0;
+    this.targetHeadingAngle = 0;
+    this.currentHeadingAngle = 0;
+    this.turnPrompt = null;
+    this.monsterRoarTimer = 0;
+    this.gameOverReason = null;
+    this.cameraShakeTimer = 0;
+
+    // Start beast aggressively right behind for 3.5 seconds at game start!
+    this.stumblesRemaining = 3;
+    this.beastSurgeTimer = 3.5;
+    this.currentBeastDistance = 3.0;
+    this.beast.group.visible = true;
+    soundEngine.setBeastPursuit(true);
+    soundEngine.playMonsterRoar();
+
+    this.player.reset();
+    this.trackGen.initTrack(6);
+    this.particleSys.clear();
+
+    this.updateStatsObject();
+    this.notifyStats();
+  }
+
+  private gameOver(reason: 'BEAST_CAUGHT' | 'FALL' | 'WALL' = 'BEAST_CAUGHT') {
+    this.state = 'GAME_OVER';
+    this.gameOverReason = reason;
+    this.player.state.isDead = true;
+    this.beastSurgeTimer = 0;
+    this.beast.group.visible = true;
+
+    soundEngine.setBeastPursuit(false);
+    if (reason === 'BEAST_CAUGHT') {
+      soundEngine.playBeastPounce();
+      soundEngine.playMonsterRoar();
+    } else {
+      soundEngine.playHit();
+      soundEngine.playMonsterRoar();
+    }
+
+    this.particleSys.emitCrashDebris(
+      this.player.group.position.x,
+      this.player.group.position.y,
+      this.player.group.position.z
+    );
+
+    // Save high score
+    const finalScore = this.stats.score;
+    if (finalScore > this.highScore) {
+      this.highScore = finalScore;
+      localStorage.setItem('jungle_runner_highscore', this.highScore.toString());
+      this.stats.highScore = this.highScore;
+    }
+
+    this.updateStatsObject();
+    this.notifyState();
+    this.notifyStats();
+  }
+
+  // --- Main Animation Loop ---
+
+  private startLoop() {
+    const tick = () => {
+      this.animationFrameId = requestAnimationFrame(tick);
+      const delta = Math.min(this.clock.getDelta(), 0.1);
+
+      if (this.state === 'PLAYING') {
+        this.updatePlaying(delta);
+      } else if (this.state === 'MENU') {
+        this.updateMenu(delta);
+      } else if (this.state === 'GAME_OVER') {
+        this.updateGameOver(delta);
+      }
+
+      this.renderer.render(this.scene, this.camera);
+    };
+
+    tick();
+  }
+
+  private updateMenu(delta: number) {
+    const time = performance.now() * 0.0008;
+    this.camera.position.x = Math.sin(time) * 4.5;
+    this.camera.position.y = 2.4 + Math.cos(time * 0.5) * 0.4;
+    this.camera.position.z = -4.5 + Math.cos(time) * 1.5;
+    this.camera.lookAt(0, 1.3, 0);
+
+    this.player.group.position.set(0, Math.sin(time * 4) * 0.04, 0);
+    this.player.group.rotation.set(0, 0, 0);
+
+    // Chaser beast lurking in the shadows behind the runner
+    this.beast.group.position.set(0, 0, -4.5);
+    this.beast.group.rotation.set(0, 0, 0);
+    this.beast.update(delta, 1.5, false);
+  }
+
+  private updatePlaying(delta: number) {
+    // 1. Difficulty & Speed Scaling
+    const progress = Math.min(this.playerDistance / 2000, 1);
+    this.currentSpeed = this.baseSpeed + progress * (this.maxSpeed - this.baseSpeed);
+    if (this.rushTimer > 0) {
+      this.currentSpeed *= 1.45;
+    }
+
+    // 2. Advance Player Along Current Corridor Chunk
+    const moveDist = this.currentSpeed * delta;
+    this.playerDistance += moveDist;
+    this.distanceInChunk += moveDist;
+
+    // 3. Power-up Timers
+    if (this.magnetTimer > 0) {
+      this.magnetTimer -= delta;
+      if (this.magnetTimer <= 0) {
+        this.player.state.hasMagnet = false;
+      }
+    }
+    if (this.rushTimer > 0) {
+      this.rushTimer -= delta;
+      if (this.rushTimer <= 0) {
+        this.player.state.hasRush = false;
+      }
+    }
+
+    // 4. Update Corridor Chunk Progression & Corner Deadlines
+    const chunk = this.trackGen.chunks[this.activeChunkIdx];
+    if (chunk) {
+      if (chunk.isCorner) {
+        if (!chunk.hasTurned) {
+          if (this.distanceInChunk >= chunk.turnZoneStart! && this.distanceInChunk <= chunk.turnZoneEnd!) {
+            this.turnPrompt = chunk.turnDirection!;
+          } else if (this.distanceInChunk > chunk.turnZoneEnd!) {
+            // Missed the turn! Ran straight into the temple dead-end wall!
+            this.gameOver('WALL');
+            return;
+          } else {
+            this.turnPrompt = null;
+          }
+        }
+      } else {
+        this.turnPrompt = null;
+        if (this.distanceInChunk >= chunk.length) {
+          this.activeChunkIdx++;
+          this.distanceInChunk -= chunk.length;
+        }
+      }
+    }
+
+    // 5. Generate future chunks and recycle old ones
+    const recycled = this.trackGen.updateAhead(this.activeChunkIdx, 1 + progress);
+    if (recycled) {
+      this.activeChunkIdx = Math.max(0, this.activeChunkIdx - 1);
+    }
+
+    // 6. Update Player Kinematics
+    this.player.update(delta, this.currentSpeed, (surface) => {
+      soundEngine.playFootstep(surface);
+      this.particleSys.emitRunningDust(
+        this.player.group.position.x,
+        this.player.group.position.y,
+        this.player.group.position.z
+      );
+    });
+
+    // 7. Calculate Runner's World Position from Local Corridor Coordinates
+    const activeChunk = this.trackGen.chunks[this.activeChunkIdx];
+    if (activeChunk) {
+      const localPos = new THREE.Vector3(
+        this.player.state.currentX,
+        this.player.state.y,
+        this.distanceInChunk
+      );
+      localPos.applyAxisAngle(new THREE.Vector3(0, 1, 0), activeChunk.headingAngle);
+      this.player.group.position.copy(activeChunk.startPos).add(localPos);
+
+      // Smooth damped heading rotation
+      this.currentHeadingAngle = THREE.MathUtils.damp(
+        this.currentHeadingAngle,
+        this.targetHeadingAngle,
+        12,
+        delta
+      );
+      this.player.group.rotation.y = this.currentHeadingAngle;
+      this.player.updateCollisionBox();
+      }
+
+    // 7b. Dynamic Beast Pursuit & Surge Mechanics
+    // Surges for 3.5s at game start, or 3.0s after a stumble!
+    // In the final 0.8s, the beast drops back and disappears into the background fog!
+    if (this.beastSurgeTimer > 0) {
+      this.beastSurgeTimer -= delta;
+      this.beast.group.visible = true;
+      soundEngine.setBeastPursuit(true);
+
+      const isRetreating = this.beastSurgeTimer < 0.8;
+      const targetDist = isRetreating
+        ? 12.0
+        : (this.stumblesRemaining <= 1 ? 2.3 : 2.9);
+
+      this.currentBeastDistance = THREE.MathUtils.damp(
+        this.currentBeastDistance,
+        targetDist,
+        isRetreating ? 5 : 12,
+        delta
+      );
+    } else {
+      // Beast retreats completely and is hidden!
+      this.beast.group.visible = false;
+      this.currentBeastDistance = 14.0;
+      soundEngine.setBeastPursuit(false);
+    }
+
+    if (this.beast.group.visible) {
+      const camDir = new THREE.Vector3(Math.sin(this.currentHeadingAngle), 0, Math.cos(this.currentHeadingAngle));
+      const beastPos = this.player.group.position.clone().addScaledVector(camDir, -this.currentBeastDistance);
+      beastPos.y = 0;
+      this.beast.group.position.copy(beastPos);
+      this.beast.group.rotation.y = this.currentHeadingAngle;
+      this.beast.update(delta, this.currentSpeed, false);
+    }
+
+    // 8. Dynamic Camera Follow (Swings smoothly behind the player around 90-degree corners)
+    const camDir = new THREE.Vector3(Math.sin(this.currentHeadingAngle), 0, Math.cos(this.currentHeadingAngle));
+    const targetCam = this.player.group.position.clone()
+      .addScaledVector(camDir, -5.6)
+      .add(new THREE.Vector3(0, 3.1 + (this.player.state.isSliding ? -0.4 : 0), 0));
+
+    this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, targetCam.x, 14, delta);
+    this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, targetCam.y, 14, delta);
+    this.camera.position.z = THREE.MathUtils.damp(this.camera.position.z, targetCam.z, 14, delta);
+
+    // Dynamic Stumble Camera Shake
+    if (this.cameraShakeTimer > 0) {
+      this.cameraShakeTimer -= delta;
+      const shakeMag = (this.cameraShakeTimer / 0.45) * 0.24;
+      this.camera.position.x += (Math.random() - 0.5) * shakeMag;
+      this.camera.position.y += (Math.random() - 0.5) * shakeMag * 0.8;
+    }
+
+    const lookTarget = this.player.group.position.clone()
+      .addScaledVector(camDir, 8.0)
+      .add(new THREE.Vector3(0, 1.25, 0));
+    this.camera.lookAt(lookTarget);
+
+    // 9. Dynamic Directional Light following runner
+    this.dirLight.position.set(
+      this.player.group.position.x + 20,
+      45,
+      this.player.group.position.z - 15
+    );
+    this.dirLight.target.position.copy(this.player.group.position);
+    this.dirLight.target.updateMatrixWorld();
+
+    // 10. Particles Update
+    this.particleSys.update(delta, this.player.group.position.z);
+
+    // 11. Collisions (Gaps, Obstacles, Coins, Powerups)
+    this.checkCollisions(delta);
+
+    // 12. Update HUD stats
+    this.updateStatsObject();
+    this.notifyStats();
+  }
+
+  private updateGameOver(delta: number) {
+    this.player.update(delta, 0);
+
+    // Beast leaps forward to capture the adventurer
+    this.beast.group.visible = true;
+    const camDir = new THREE.Vector3(Math.sin(this.currentHeadingAngle), 0, Math.cos(this.currentHeadingAngle));
+    const pouncePos = this.player.group.position.clone().addScaledVector(camDir, -0.5);
+    this.beast.group.position.lerp(pouncePos, 0.12);
+    this.beast.group.rotation.y = this.currentHeadingAngle;
+    this.beast.update(delta, 0, true);
+
+    const targetCam = this.player.group.position.clone()
+      .addScaledVector(camDir, -3.8)
+      .add(new THREE.Vector3(0, 2.3, 0));
+
+    this.camera.position.lerp(targetCam, 0.08);
+    this.camera.lookAt(this.player.group.position.x, 0.9, this.player.group.position.z);
+  }
+
+  private checkCollisions(delta: number) {
+    const py = this.player.state.y;
+    const isSliding = this.player.state.isSliding;
+    const hasRush = this.rushTimer > 0;
+    const hasMagnet = this.magnetTimer > 0;
+
+    // Check collisions within the current active chunk
+    const chunk = this.trackGen.chunks[this.activeChunkIdx];
+    if (!chunk) return;
+
+    // A. Check Chasm Gaps
+    if (chunk.hasGap && chunk.gapZStart !== undefined && chunk.gapZEnd !== undefined) {
+      if (this.distanceInChunk >= chunk.gapZStart && this.distanceInChunk <= chunk.gapZEnd) {
+        if (chunk.gapLanes && chunk.gapLanes.includes(this.player.state.lane)) {
+          if (py < 0.3) {
+            this.gameOver('FALL');
+            return;
+          }
+        }
+      }
+    }
+
+    // B. Check Obstacles
+    for (const obs of chunk.obstacles) {
+      if (!obs.active) continue;
+
+      if (Math.abs(obs.z - this.distanceInChunk) > 3.5) continue;
+
+      if (obs.box.intersectsBox(this.player.collisionBox)) {
+        if (obs.type === 'low' && py >= obs.clearHeight - 0.25) {
+          continue; // Vaulted over!
+        }
+        if (obs.type === 'high' && isSliding) {
+          continue; // Slid under!
+        }
+        if (hasRush) {
+          obs.active = false;
+          chunk.group.remove(obs.group);
+          soundEngine.playHit();
+          this.particleSys.emitCrashDebris(this.player.group.position.x, 1.0, this.player.group.position.z);
+          continue;
+        }
+        if (this.player.state.hasShield) {
+          this.player.state.hasShield = false;
+          obs.active = false;
+          chunk.group.remove(obs.group);
+          soundEngine.playHit();
+          this.particleSys.emitCrashDebris(this.player.group.position.x, 1.0, this.player.group.position.z);
+          continue;
+        }
+
+        // Any unprotected obstacle collision ends the game.
+        obs.active = false;
+        chunk.group.remove(obs.group);
+        this.particleSys.emitCrashDebris(
+          this.player.group.position.x,
+          1.0,
+          this.player.group.position.z
+        );
+        soundEngine.playHit();
+        this.gameOver('BEAST_CAUGHT');
+        return;
+      }
+    }
+
+    // C. Check Coins
+    for (const coin of chunk.coins) {
+      if (coin.collected) continue;
+
+      coin.mesh.rotation.z += delta * 4;
+
+      if (hasMagnet) {
+        const coinDist = Math.abs(coin.z - this.distanceInChunk);
+        if (coinDist < 12) {
+          coin.mesh.position.y = THREE.MathUtils.damp(coin.mesh.position.y, py + 0.9, 14, delta);
+        }
+      }
+
+      if (Math.abs(coin.z - this.distanceInChunk) < 1.4 && coin.lane === this.player.state.lane) {
+        if (Math.abs(coin.mesh.position.y - (py + 0.9)) < 1.6) {
+          coin.collected = true;
+          chunk.group.remove(coin.mesh);
+          this.coinsCount += 1;
+          soundEngine.playCoin();
+          this.particleSys.emitCoinBurst(this.player.group.position.x, this.player.group.position.y + 0.8, this.player.group.position.z);
+        }
+      }
+    }
+
+    // D. Check Powerups
+    for (const p of chunk.powerups) {
+      if (p.collected) continue;
+
+      p.group.rotation.y += delta * 3;
+      p.group.position.y = 1.2 + Math.sin(performance.now() * 0.005) * 0.2;
+
+      if (Math.abs(p.z - this.distanceInChunk) < 1.6 && p.lane === this.player.state.lane) {
+        p.collected = true;
+        chunk.group.remove(p.group);
+        soundEngine.playPowerup();
+        this.particleSys.emitCoinBurst(this.player.group.position.x, 1.2, this.player.group.position.z);
+
+        if (p.type === 'shield') {
+          this.player.state.hasShield = true;
+        } else if (p.type === 'magnet') {
+          this.player.state.hasMagnet = true;
+          this.magnetTimer = 10.0;
+        } else if (p.type === 'rush') {
+          this.player.state.hasRush = true;
+          this.rushTimer = 6.0;
+        }
+      }
+    }
+  }
+
+  private updateStatsObject() {
+    const rawScore = Math.floor(this.playerDistance * 1.5 + this.coinsCount * 60);
+    this.stats = {
+      score: rawScore,
+      distance: Math.floor(this.playerDistance),
+      coins: this.coinsCount,
+      highScore: Math.max(this.highScore, rawScore),
+      speed: Math.round(this.currentSpeed * 10) / 10,
+      activeShield: this.player.state.hasShield,
+      activeMagnet: this.magnetTimer > 0,
+      activeRush: this.rushTimer > 0,
+      magnetTimeLeft: Math.ceil(this.magnetTimer),
+      rushTimeLeft: Math.ceil(this.rushTimer),
+      turnPrompt: this.turnPrompt,
+      stumblesRemaining: Math.max(0, this.stumblesRemaining),
+      maxStumbles: this.maxStumbles,
+      isBeastOnHeels: this.beastSurgeTimer > 0,
+      beastTimeLeft: Math.max(0, Math.ceil(this.beastSurgeTimer)),
+      gameOverReason: this.gameOverReason,
+    };
+  }
+
+  public dispose() {
+    if (this.animationFrameId !== null) {
+      cancelAnimationFrame(this.animationFrameId);
+    }
+    this.unbindEvents();
+    this.trackGen.clearAll();
+    this.renderer.dispose();
+  }
+}
