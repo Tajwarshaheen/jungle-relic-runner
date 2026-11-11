@@ -205,8 +205,8 @@ export class ChaserBeast {
     rLegMesh.castShadow = true;
     this.rightLegGroup.add(rLegMesh);
 
-    // Scale beast up for a terrifying, overwhelming presence
-    this.group.scale.setScalar(1.35);
+    // Sleek demon monkey scale (compact & menacing, doesn't block player sightline)
+    this.group.scale.setScalar(0.72);
   }
 
   public update(delta: number, speed: number, isGameOver: boolean) {

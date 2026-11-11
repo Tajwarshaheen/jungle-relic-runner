@@ -48,6 +48,8 @@ export class Adventurer {
 
   // Collision box (for obstacle checks)
   public collisionBox: THREE.Box3 = new THREE.Box3();
+  public localBox: THREE.Box3 = new THREE.Box3();
+  public isInvulnerable: boolean = false;
 
   constructor() {
     this.group = new THREE.Group();
@@ -381,6 +383,8 @@ export class Adventurer {
     this.group.rotation.set(0, 0, 0);
     this.rootBody.rotation.set(0, 0, 0);
     this.rootBody.position.y = 1.0;
+    this.isInvulnerable = false;
+    this.rootBody.visible = true;
     this.shieldMesh.visible = false;
     this.rushTrailMesh.visible = false;
     this.updateCollisionBox();
@@ -391,9 +395,17 @@ export class Adventurer {
   public update(delta: number, speed: number, onFootstep?: (surface: 'stone' | 'wood') => void) {
     if (this.state.isDead) {
       // Defeat stumble backwards
+      this.rootBody.visible = true;
       this.rootBody.rotation.x = THREE.MathUtils.damp(this.rootBody.rotation.x, -Math.PI / 2.5, 6, delta);
       this.rootBody.position.y = THREE.MathUtils.damp(this.rootBody.position.y, 0.4, 6, delta);
       return;
+    }
+
+    // Invulnerability visual flicker
+    if (this.isInvulnerable) {
+      this.rootBody.visible = Math.floor(performance.now() / 90) % 2 === 0;
+    } else {
+      this.rootBody.visible = true;
     }
 
     if (this.stumbleTimer > 0) {
@@ -515,6 +527,22 @@ export class Adventurer {
       // Standard standing / jumping bounding box (height ~1.95m)
       this.collisionBox.min.set(x - 0.45, y, z - 0.45);
       this.collisionBox.max.set(x + 0.45, y + 1.95, z + 0.45);
+    }
+  }
+
+  public updateLocalCollisionBox(distanceInChunk: number) {
+    const px = this.state.currentX;
+    const py = this.state.y;
+    const pz = distanceInChunk;
+
+    if (this.state.isSliding) {
+      // Low bounding box when sliding (height ~0.65m)
+      this.localBox.min.set(px - 0.45, py, pz - 0.7);
+      this.localBox.max.set(px + 0.45, py + 0.65, pz + 0.7);
+    } else {
+      // Standard standing / jumping bounding box (height ~1.95m)
+      this.localBox.min.set(px - 0.45, py, pz - 0.45);
+      this.localBox.max.set(px + 0.45, py + 1.95, pz + 0.45);
     }
   }
 }

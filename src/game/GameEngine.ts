@@ -27,6 +27,8 @@ export interface GameStats {
   isBeastOnHeels: boolean;
   beastTimeLeft: number;
   gameOverReason: 'BEAST_CAUGHT' | 'FALL' | 'WALL' | null;
+  screenSidesRed: boolean;
+  impactFlash: boolean;
 }
 
 export class GameEngine {
@@ -45,13 +47,15 @@ export class GameEngine {
   public particleSys: ParticleSystem;
   private monsterRoarTimer: number = 0;
 
-  // Chaser Beast Surge & 3-Stumble System
-  public stumblesRemaining: number = 3;
-  public readonly maxStumbles: number = 3;
+  // 2-Hit Life System: 1st hit -> Screen sides turn red, 2nd hit -> Game Over
+  public stumblesRemaining: number = 2;
+  public readonly maxStumbles: number = 2;
   public beastSurgeTimer: number = 0;
   public currentBeastDistance: number = 14.0;
   public gameOverReason: 'BEAST_CAUGHT' | 'FALL' | 'WALL' | null = null;
   private cameraShakeTimer: number = 0;
+  private invulnerableTimer: number = 0;
+  private impactFlashTimer: number = 0;
 
   // Environment lights
   private dirLight: THREE.DirectionalLight;
@@ -109,11 +113,13 @@ export class GameEngine {
       magnetTimeLeft: 0,
       rushTimeLeft: 0,
       turnPrompt: null,
-      stumblesRemaining: 3,
-      maxStumbles: 3,
+      stumblesRemaining: 2,
+      maxStumbles: 2,
       isBeastOnHeels: false,
       beastTimeLeft: 0,
       gameOverReason: null,
+      screenSidesRed: false,
+      impactFlash: false,
     };
 
     // 1. Scene setup
@@ -493,10 +499,12 @@ export class GameEngine {
     this.gameOverReason = null;
     this.cameraShakeTimer = 0;
 
-    // Start beast aggressively right behind for 3.5 seconds at game start!
-    this.stumblesRemaining = 3;
+    // Reset lives to 2 (1st hit = red screen sides warning, 2nd hit = game over)
+    this.stumblesRemaining = 2;
+    this.invulnerableTimer = 0;
+    this.impactFlashTimer = 0;
     this.beastSurgeTimer = 3.5;
-    this.currentBeastDistance = 3.0;
+    this.currentBeastDistance = 4.8;
     this.beast.group.visible = true;
     soundEngine.setBeastPursuit(true);
     soundEngine.playMonsterRoar();
@@ -594,7 +602,17 @@ export class GameEngine {
     this.playerDistance += moveDist;
     this.distanceInChunk += moveDist;
 
-    // 3. Power-up Timers
+    // 3. Power-up & Grace Period Timers
+    if (this.invulnerableTimer > 0) {
+      this.invulnerableTimer -= delta;
+      this.player.isInvulnerable = this.invulnerableTimer > 0;
+    } else {
+      this.player.isInvulnerable = false;
+    }
+    if (this.impactFlashTimer > 0) {
+      this.impactFlashTimer -= delta;
+    }
+
     if (this.magnetTimer > 0) {
       this.magnetTimer -= delta;
       if (this.magnetTimer <= 0) {
@@ -678,19 +696,29 @@ export class GameEngine {
       this.beast.group.visible = true;
       soundEngine.setBeastPursuit(true);
 
-      const isRetreating = this.beastSurgeTimer < 0.8;
+      const isRetreating = this.beastSurgeTimer < 0.8 && this.stumblesRemaining > 1;
       const targetDist = isRetreating
-        ? 12.0
-        : (this.stumblesRemaining <= 1 ? 2.3 : 2.9);
+        ? 13.0
+        : (this.stumblesRemaining <= 1 ? 4.2 : 5.0);
 
       this.currentBeastDistance = THREE.MathUtils.damp(
         this.currentBeastDistance,
         targetDist,
-        isRetreating ? 5 : 12,
+        isRetreating ? 5 : 10,
         delta
       );
+    } else if (this.stumblesRemaining <= 1) {
+      // Beast stays lurking at a safe chase distance behind on 1 life (doesn't block view)
+      this.beast.group.visible = true;
+      this.currentBeastDistance = THREE.MathUtils.damp(
+        this.currentBeastDistance,
+        4.4,
+        6,
+        delta
+      );
+      soundEngine.setBeastPursuit(true);
     } else {
-      // Beast retreats completely and is hidden!
+      // Beast retreats completely and is hidden in fog
       this.beast.group.visible = false;
       this.currentBeastDistance = 14.0;
       soundEngine.setBeastPursuit(false);
@@ -705,11 +733,11 @@ export class GameEngine {
       this.beast.update(delta, this.currentSpeed, false);
     }
 
-    // 8. Dynamic Camera Follow (Swings smoothly behind the player around 90-degree corners)
+    // 8. Dynamic Camera Follow (Elevated sightline gives crystal-clear view of oncoming obstacles)
     const camDir = new THREE.Vector3(Math.sin(this.currentHeadingAngle), 0, Math.cos(this.currentHeadingAngle));
     const targetCam = this.player.group.position.clone()
-      .addScaledVector(camDir, -5.6)
-      .add(new THREE.Vector3(0, 3.1 + (this.player.state.isSliding ? -0.4 : 0), 0));
+      .addScaledVector(camDir, -5.9)
+      .add(new THREE.Vector3(0, 3.35 + (this.player.state.isSliding ? -0.4 : 0), 0));
 
     this.camera.position.x = THREE.MathUtils.damp(this.camera.position.x, targetCam.x, 14, delta);
     this.camera.position.y = THREE.MathUtils.damp(this.camera.position.y, targetCam.y, 14, delta);
@@ -724,7 +752,7 @@ export class GameEngine {
     }
 
     const lookTarget = this.player.group.position.clone()
-      .addScaledVector(camDir, 8.0)
+      .addScaledVector(camDir, 8.5)
       .add(new THREE.Vector3(0, 1.25, 0));
     this.camera.lookAt(lookTarget);
 
@@ -789,13 +817,15 @@ export class GameEngine {
       }
     }
 
-    // B. Check Obstacles
+    // B. Check Obstacles using local chunk coordinates
+    this.player.updateLocalCollisionBox(this.distanceInChunk);
+
     for (const obs of chunk.obstacles) {
       if (!obs.active) continue;
 
-      if (Math.abs(obs.z - this.distanceInChunk) > 3.5) continue;
+      if (Math.abs(obs.z - this.distanceInChunk) > 3.0) continue;
 
-      if (obs.box.intersectsBox(this.player.collisionBox)) {
+      if (obs.box.intersectsBox(this.player.localBox)) {
         if (obs.type === 'low' && py >= obs.clearHeight - 0.25) {
           continue; // Vaulted over!
         }
@@ -818,7 +848,12 @@ export class GameEngine {
           continue;
         }
 
-        // Any unprotected obstacle collision ends the game.
+        // If currently in invulnerability grace period, avoid immediate double-hit
+        if (this.invulnerableTimer > 0) {
+          continue;
+        }
+
+        // UNPROTECTED COLLISION WITH OBSTACLE!
         obs.active = false;
         chunk.group.remove(obs.group);
         this.particleSys.emitCrashDebris(
@@ -827,8 +862,27 @@ export class GameEngine {
           this.player.group.position.z
         );
         soundEngine.playHit();
-        this.gameOver('BEAST_CAUGHT');
-        return;
+        this.cameraShakeTimer = 0.55;
+
+        // Decrement life: 1st hit triggers red screen sides; 2nd hit triggers Game Over!
+        this.stumblesRemaining--;
+        this.invulnerableTimer = 1.3;
+        this.impactFlashTimer = 0.35;
+
+        if (this.stumblesRemaining <= 0) {
+          // 2nd Hit = GAME OVER!
+          this.gameOver('BEAST_CAUGHT');
+          return;
+        } else {
+          // 1st Hit = Character stumbles, screen sides turn red, demon beast surges right behind!
+          this.player.triggerStumble();
+          soundEngine.playStumble();
+          soundEngine.playMonsterRoar();
+          this.beastSurgeTimer = 7.0;
+          this.currentBeastDistance = 4.4;
+          this.beast.group.visible = true;
+          soundEngine.setBeastPursuit(true);
+        }
       }
     }
 
@@ -898,9 +952,11 @@ export class GameEngine {
       turnPrompt: this.turnPrompt,
       stumblesRemaining: Math.max(0, this.stumblesRemaining),
       maxStumbles: this.maxStumbles,
-      isBeastOnHeels: this.beastSurgeTimer > 0,
+      isBeastOnHeels: this.beastSurgeTimer > 0 || this.stumblesRemaining <= 1,
       beastTimeLeft: Math.max(0, Math.ceil(this.beastSurgeTimer)),
       gameOverReason: this.gameOverReason,
+      screenSidesRed: this.stumblesRemaining === 1,
+      impactFlash: this.impactFlashTimer > 0,
     };
   }
 

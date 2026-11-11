@@ -140,7 +140,7 @@ export class TrackGenerator {
         type = this.pickNextChunkType();
       }
 
-      const chunk = this.createChunk(type, currentStart, currentAngle, i < 2);
+      const chunk = this.createChunk(type, currentStart, currentAngle, i < 1);
       this.chunks.push(chunk);
       this.scene.add(chunk.group);
 
@@ -499,7 +499,7 @@ export class TrackGenerator {
               group.add(c.mesh);
               coins.push(c);
             });
-          } else if (rand < 0.9) {
+          } else if (rand < 0.82) {
             // Blocker: Stone Idol Head
             const lane = Math.floor(Math.random() * 3) - 1;
             const idol = this.obstacleMgr.createIdolBlocker(lane, obsZ);
@@ -507,6 +507,19 @@ export class TrackGenerator {
             obstacles.push(idol);
 
             const openLane = lane === 0 ? 1 : 0;
+            const safeCoins = this.coinMgr.createCoinRow(openLane, obsZ - 4, 4, 2.5);
+            safeCoins.forEach((c) => {
+              group.add(c.mesh);
+              coins.push(c);
+            });
+          } else if (rand < 0.92) {
+            // Blocker: Flaming Temple Brazier
+            const lane = Math.floor(Math.random() * 3) - 1;
+            const brazier = this.obstacleMgr.createFlamingBrazier(lane, obsZ);
+            group.add(brazier.group);
+            obstacles.push(brazier);
+
+            const openLane = lane === 0 ? -1 : 0;
             const safeCoins = this.coinMgr.createCoinRow(openLane, obsZ - 4, 4, 2.5);
             safeCoins.forEach((c) => {
               group.add(c.mesh);

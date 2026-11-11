@@ -87,23 +87,23 @@ export const GameUI: React.FC<GameUIProps> = ({
 
           {/* Center: Stumbles / Lives & Active Power-up Badges */}
           <div className="flex flex-col items-center gap-1.5 pointer-events-auto">
-            {/* 3-Strike Life / Stumble Threat Indicator */}
+            {/* 2-Life System */}
             <div className="bg-stone-900/90 backdrop-blur-md border border-stone-700/80 rounded-xl px-3 py-1 flex items-center gap-2 shadow-xl">
               <span className="text-[10px] uppercase tracking-wider font-extrabold text-stone-300">
                 LIVES:
               </span>
               <div className="flex items-center gap-1.5">
-                {[1, 2, 3].map((strikeIdx) => {
+                {[1, 2].map((strikeIdx) => {
                   const isAlive = stats.stumblesRemaining >= strikeIdx;
                   return (
                     <div
                       key={strikeIdx}
-                      className={`w-5 h-5 rounded-md flex items-center justify-center text-xs transition-all ${
+                      className={`w-6 h-6 rounded-md flex items-center justify-center text-xs transition-all ${
                         isAlive
-                          ? 'bg-rose-950/70 border border-rose-500/80 shadow-sm scale-100'
+                          ? 'bg-rose-950/80 border border-rose-500/90 shadow-sm scale-100'
                           : 'bg-stone-950/90 border border-stone-800 text-stone-600 scale-90 opacity-40'
                       }`}
-                      title={isAlive ? `Life ${strikeIdx} active` : `Strike ${strikeIdx} lost!`}
+                      title={isAlive ? `Life ${strikeIdx} active` : `Life ${strikeIdx} lost!`}
                     >
                       {isAlive ? '❤️' : '💀'}
                     </div>
@@ -169,12 +169,56 @@ export const GameUI: React.FC<GameUIProps> = ({
       )}
 
       {/* =========================================================================
-          DYNAMIC BEAST PURSUIT ALERT & BLOOD-RED PULSE VIGNETTE
+          DYNAMIC SCREEN BOTH SIDES RED (Triggered when hit 1st time by obstacle)
           ========================================================================= */}
-      {gameState === 'PLAYING' && stats.isBeastOnHeels && (
+      {gameState === 'PLAYING' && stats.screenSidesRed && (
+        <div className="fixed inset-0 pointer-events-none z-30 overflow-hidden">
+          {/* Left Side Red Warning Bar & Inner Glow */}
+          <div className="absolute top-0 bottom-0 left-0 w-16 sm:w-28 md:w-40 pointer-events-none">
+            <div className="w-full h-full bg-gradient-to-r from-red-600/90 via-red-600/40 to-transparent shadow-[inset_30px_0_45px_rgba(239,68,68,0.85)] animate-pulse" />
+            <div className="absolute top-0 bottom-0 left-0 w-2.5 sm:w-3 bg-gradient-to-b from-red-500 via-rose-500 to-red-600 shadow-[0_0_25px_#ef4444]" />
+          </div>
+
+          {/* Right Side Red Warning Bar & Inner Glow */}
+          <div className="absolute top-0 bottom-0 right-0 w-16 sm:w-28 md:w-40 pointer-events-none">
+            <div className="w-full h-full bg-gradient-to-l from-red-600/90 via-red-600/40 to-transparent shadow-[inset_-30px_0_45px_rgba(239,68,68,0.85)] animate-pulse" />
+            <div className="absolute top-0 bottom-0 right-0 w-2.5 sm:w-3 bg-gradient-to-b from-red-500 via-rose-500 to-red-600 shadow-[0_0_25px_#ef4444]" />
+          </div>
+
+          {/* Subtle perimeter danger vignette */}
+          <div className="absolute inset-0 shadow-[inset_0_0_80px_rgba(220,38,38,0.55)] animate-pulse" />
+
+          {/* Critical Warning Alert Banner */}
+          <div className="absolute top-20 md:top-24 left-1/2 -translate-x-1/2 z-40">
+            <div className="bg-gradient-to-r from-red-950/95 via-rose-950/95 to-red-950/95 border-2 border-red-500 text-red-100 px-5 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3 backdrop-blur-md animate-bounce">
+              <span className="text-2xl animate-pulse">⚠️</span>
+              <div className="flex flex-col text-left">
+                <span className="font-cinzel font-black tracking-wider text-sm sm:text-base text-red-300">
+                  CRITICAL: HIT TAKEN! LAST LIFE!
+                </span>
+                <span className="text-[11px] text-red-200/95 font-semibold">
+                  Next obstacle collision = Game Over! Dodge now!
+                </span>
+              </div>
+              <div className="bg-red-600 px-3 py-1 rounded-xl text-white font-mono font-black text-xs animate-pulse">
+                1 HIT LEFT
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Immediate Fullscreen Impact Flash */}
+      {gameState === 'PLAYING' && stats.impactFlash && (
+        <div className="fixed inset-0 bg-red-600/35 pointer-events-none z-50 transition-opacity duration-150" />
+      )}
+
+      {/* =========================================================================
+          DYNAMIC BEAST PURSUIT ALERT (During start chase or beast surge)
+          ========================================================================= */}
+      {gameState === 'PLAYING' && stats.isBeastOnHeels && !stats.screenSidesRed && (
         <div className="absolute inset-0 pointer-events-none z-30">
-          {/* Intense red vignette border */}
-          <div className="absolute inset-0 shadow-[inset_0_0_100px_rgba(225,29,72,0.65)] animate-pulse" />
+          <div className="absolute inset-0 shadow-[inset_0_0_80px_rgba(225,29,72,0.4)] animate-pulse" />
 
           {/* Beast Banner */}
           <div className="absolute top-20 md:top-24 left-1/2 -translate-x-1/2 z-40">
@@ -182,14 +226,10 @@ export const GameUI: React.FC<GameUIProps> = ({
               <span className="text-2xl animate-pulse">👹</span>
               <div className="flex flex-col text-left">
                 <span className="font-cinzel font-black tracking-wider text-sm sm:text-base text-rose-300">
-                  {stats.stumblesRemaining <= 1
-                    ? '⚠️ CRITICAL: BEAST IS SNAPPING! ⚠️'
-                    : '⚠️ DEMON BEAST ON YOUR HEELS! ⚠️'}
+                  DEMON BEAST ON YOUR HEELS!
                 </span>
                 <span className="text-[11px] text-rose-200/90 font-semibold">
-                  {stats.stumblesRemaining <= 1
-                    ? 'NEXT STUMBLE = CAUGHT! ESCAPE NOW!'
-                    : `Run cleanly for ${stats.beastTimeLeft}s or 3 stumbles = Game Over!`}
+                  Escape the demon! Keep running cleanly!
                 </span>
               </div>
               <div className="bg-rose-600/90 px-2.5 py-1 rounded-xl text-white font-mono font-black text-sm">
@@ -520,8 +560,10 @@ export const GameUI: React.FC<GameUIProps> = ({
               </div>
 
               <div className="bg-stone-950/70 border border-stone-800 rounded-xl p-3">
-                <span className="font-bold text-amber-400 text-sm block mb-1">Obstacles & Rules</span>
+                <span className="font-bold text-amber-400 text-sm block mb-1">Obstacles & 2-Life System</span>
                 <ul className="space-y-1 text-stone-300">
+                  <li>• <strong className="text-white">1st Hit:</strong> Causes damage! Screen sides light up red and the demon beast snaps right behind you!</li>
+                  <li>• <strong className="text-white">2nd Hit:</strong> Fatal crash! The beast captures you — Game Over!</li>
                   <li>• <strong className="text-white">Low Obstacles (Logs & Barricades):</strong> Jump over them cleanly.</li>
                   <li>• <strong className="text-white">High Obstacles (Carved Lintels):</strong> Slide underneath them.</li>
                   <li>• <strong className="text-white">Giant Idols & Pillars:</strong> Switch lanes to bypass them.</li>

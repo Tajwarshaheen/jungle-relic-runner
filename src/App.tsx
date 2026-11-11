@@ -20,11 +20,13 @@ export default function App() {
     magnetTimeLeft: 0,
     rushTimeLeft: 0,
     turnPrompt: null,
-    stumblesRemaining: 3,
-    maxStumbles: 3,
+    stumblesRemaining: 2,
+    maxStumbles: 2,
     isBeastOnHeels: false,
     beastTimeLeft: 0,
     gameOverReason: null,
+    screenSidesRed: false,
+    impactFlash: false,
   });
   const [isMuted, setIsMuted] = useState<boolean>(false);
 
